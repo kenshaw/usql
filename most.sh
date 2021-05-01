@@ -1,7 +1,13 @@
 #!/bin/bash
 
+set -e
+
+SRC=$(realpath $(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd))
+
 NAME=usql
 VER="$(date +%y.%m.%d)-dev"
+
+PLATFORM=$(uname|sed -e 's/_.*//'|tr '[:upper:]' '[:lower:]'|sed -e 's/^\(msys\|mingw\).*/windows/')
 
 TAGS=(
   most
@@ -17,14 +23,25 @@ TAGS=(
   netgo
   static_build
 )
+
+ICULIBS=$(pkg-config --libs icu-i18n)
+case "$PLATFORM" in
+  windows)
+    if [ ! -e /mingw64/lib/libicui18n.a ]; then
+      pushd /mingw64/lib &> /dev/null
+      cmd /c 'mklink libicui18n.a libicuin.a'
+      popd &> /dev/null
+    fi
+    ICULIBS=$(sed -e 's/-licuin //' <<< "$ICULIBS")
+  ;;
+esac
+
 TAGS="${TAGS[@]}"
 
 EXTLDFLAGS=(
   -fno-PIC
   -static
-  -licuuc
-  -licui18n
-  -licudata
+  $ICULIBS
   -ldl
 )
 EXTLDFLAGS="${EXTLDFLAGS[@]}"
