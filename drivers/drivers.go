@@ -64,7 +64,7 @@ type Driver struct {
 	// ForceParams will be used to force parameters if defined.
 	ForceParams func(*dburl.URL)
 	// Open will be used by Open if defined.
-	Open func(*dburl.URL, func() io.Writer, func() io.Writer) (func(string, string) (*sql.DB, error), error)
+	Open func(context.Context, *dburl.URL, func() io.Writer, func() io.Writer) (func(string, string) (*sql.DB, error), error)
 	// Version will be used by Version if defined.
 	Version func(context.Context, DB) (string, error)
 	// User will be used by User if defined.
@@ -74,7 +74,9 @@ type Driver struct {
 	// IsPasswordErr will be used by IsPasswordErr if defined.
 	IsPasswordErr func(error) bool
 	// Process will be used by Process if defined.
-	Process func(string, string) (string, string, bool, error)
+	Process func(*dburl.URL, string, string) (string, string, bool, error)
+	// ColumnTypes is a callback that will be used if
+	ColumnTypes func(*sql.ColumnType) (interface{}, error)
 	// RowsAffected will be used by RowsAffected if defined.
 	RowsAffected func(sql.Result) (int64, error)
 	// Err will be used by Error.Error if defined.
@@ -160,7 +162,7 @@ func ForceParams(u *dburl.URL) {
 }
 
 // Open opens a sql.DB connection for a driver.
-func Open(u *dburl.URL, stdout, stderr func() io.Writer) (*sql.DB, error) {
+func Open(ctx context.Context, u *dburl.URL, stdout, stderr func() io.Writer) (*sql.DB, error) {
 	d, ok := drivers[u.Driver]
 	if !ok {
 		return nil, WrapErr(u.Driver, text.ErrDriverNotAvailable)
@@ -168,11 +170,15 @@ func Open(u *dburl.URL, stdout, stderr func() io.Writer) (*sql.DB, error) {
 	f := sql.Open
 	if d.Open != nil {
 		var err error
-		if f, err = d.Open(u, stdout, stderr); err != nil {
+		if f, err = d.Open(ctx, u, stdout, stderr); err != nil {
 			return nil, WrapErr(u.Driver, err)
 		}
 	}
-	db, err := f(u.Driver, u.DSN)
+	driver := u.Driver
+	if u.GoDriver != "" {
+		driver = u.GoDriver
+	}
+	db, err := f(driver, u.DSN)
 	if err != nil {
 		return nil, WrapErr(u.Driver, err)
 	}
@@ -242,11 +248,16 @@ func User(ctx context.Context, u *dburl.URL, db DB) (string, error) {
 // Process processes the sql query for a driver.
 func Process(u *dburl.URL, prefix, sqlstr string) (string, string, bool, error) {
 	if d, ok := drivers[u.Driver]; ok && d.Process != nil {
-		a, b, c, err := d.Process(prefix, sqlstr)
+		a, b, c, err := d.Process(u, prefix, sqlstr)
 		return a, b, c, WrapErr(u.Driver, err)
 	}
 	typ, q := QueryExecType(prefix, sqlstr)
 	return typ, sqlstr, q, nil
+}
+
+// ColumnTypes returns the column types callback for a driver.
+func ColumnTypes(u *dburl.URL) func(*sql.ColumnType) (interface{}, error) {
+	return drivers[u.Driver].ColumnTypes
 }
 
 // IsPasswordErr returns true if an err is a password error for a driver.
@@ -506,7 +517,7 @@ func Copy(ctx context.Context, u *dburl.URL, stdout, stderr func() io.Writer, ro
 	if d.Copy == nil {
 		return 0, fmt.Errorf(text.NotSupportedByDriver, "copy", u.Driver)
 	}
-	db, err := Open(u, stdout, stderr)
+	db, err := Open(ctx, u, stdout, stderr)
 	if err != nil {
 		return 0, err
 	}
@@ -592,4 +603,8 @@ func CopyWithInsert(placeholder func(int) string) func(ctx context.Context, db *
 		}
 		return n, rows.Err()
 	}
+}
+
+func init() {
+	dburl.OdbcIgnoreQueryPrefixes = []string{"usql_"}
 }

@@ -226,8 +226,15 @@ func (h *Handler) Run() error {
 	stdout, stderr, iactive := h.l.Stdout(), h.l.Stderr(), h.l.Interactive()
 	// display welcome info
 	if iactive {
-		fmt.Fprintln(h.l.Stdout(), text.WelcomeDesc)
-		fmt.Fprintln(h.l.Stdout())
+		// graphics logo
+		if typ := env.TermGraphics(); typ.Available() {
+			if err := typ.Encode(stdout, text.Logo); err != nil {
+				return err
+			}
+		}
+		// welcome text
+		fmt.Fprintln(stdout, text.WelcomeDesc)
+		fmt.Fprintln(stdout)
 	}
 	var lastErr error
 	for {
@@ -529,7 +536,14 @@ func (h *Handler) Prompt(prompt string) string {
 			buf = append(buf, '%')
 		case 'S': // short driver name
 			if connected {
-				buf = append(buf, dburl.ShortAlias(h.u.Scheme)+":"...)
+				s := dburl.ShortAlias(h.u.Scheme)
+				if s == "" {
+					s = dburl.ShortAlias(h.u.Driver)
+				}
+				if s == "" {
+					s = text.UnknownShortAlias
+				}
+				buf = append(buf, s+":"...)
 			} else {
 				buf = append(buf, text.NotConnected...)
 			}
@@ -717,20 +731,7 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 		urlstr := params[0]
 		// parse dsn
 		u, err := dburl.Parse(urlstr)
-		switch {
-		case err == dburl.ErrInvalidDatabaseScheme:
-			fi, err := os.Stat(urlstr)
-			switch {
-			case err != nil:
-				return err
-			case fi.IsDir():
-				return h.Open(ctx, "postgres+unix:"+urlstr)
-			case fi.Mode()&os.ModeSocket != 0:
-				return h.Open(ctx, "mysql+unix:"+urlstr)
-			}
-			// it is a file, so reattempt to open it with sqlite3
-			return h.Open(ctx, "sqlite3:"+urlstr)
-		case err != nil:
+		if err != nil {
 			return err
 		}
 		h.u = u
@@ -744,7 +745,7 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 	}
 	// open connection
 	var err error
-	h.db, err = drivers.Open(h.u, h.GetOutput, h.IO().Stderr)
+	h.db, err = drivers.Open(ctx, h.u, h.GetOutput, h.IO().Stderr)
 	if err != nil && !drivers.IsPasswordErr(h.u, err) {
 		defer h.Close()
 		return err
@@ -1111,25 +1112,29 @@ func (h *Handler) query(ctx context.Context, w io.Writer, opt metacmd.Option, ty
 	} else if opt.Exec != metacmd.ExecWatch {
 		params["pager_cmd"] = env.All()["PAGER"]
 	}
-	useColumnTypes := drivers.UseColumnTypes(h.u)
+	// set up column type config
+	var extra []tblfmt.Option
+	switch f := drivers.ColumnTypes(h.u); {
+	case f != nil:
+		extra = append(extra, tblfmt.WithColumnTypesFunc(f))
+	case drivers.UseColumnTypes(h.u):
+		extra = append(extra, tblfmt.WithUseColumnTypes(true))
+	}
 	// wrap query with crosstab
 	resultSet := tblfmt.ResultSet(rows)
 	if opt.Exec == metacmd.ExecCrosstab {
 		var err error
-		resultSet, err = tblfmt.NewCrosstabView(rows, tblfmt.WithParams(opt.Crosstab...), tblfmt.WithUseColumnTypes(useColumnTypes))
+		resultSet, err = tblfmt.NewCrosstabView(rows, append(extra, tblfmt.WithParams(opt.Crosstab...))...)
 		if err != nil {
 			return err
 		}
-		useColumnTypes = false
+		extra = nil
 	}
 	if drivers.LowerColumnNames(h.u) {
 		params["lower_column_names"] = "true"
 	}
-	if useColumnTypes {
-		params["use_column_types"] = "true"
-	}
 	// encode and handle error conditions
-	switch err := tblfmt.EncodeAll(w, resultSet, params); {
+	switch err := tblfmt.EncodeAll(w, resultSet, params, extra...); {
 	case err != nil && cmd != nil && errors.Is(err, syscall.EPIPE):
 		// broken pipe means pager quit before consuming all data, which might be expected
 		return nil

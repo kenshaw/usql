@@ -1,4 +1,4 @@
-//go:build tools
+//go:build ignore
 
 package main
 
@@ -11,16 +11,17 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/mattn/go-runewidth"
 	"github.com/xo/dburl"
+	"github.com/yookoala/realpath"
 )
 
 type DriverInfo struct {
@@ -66,14 +67,17 @@ var wireDrivers = map[string]DriverInfo{}
 func main() {
 	licenseStart := flag.Int("license-start", 2016, "license start year")
 	licenseAuthor := flag.String("license-author", "Kenneth Shaw", "license author")
+	dburlGen := flag.Bool("dburl-gen", false, "enable dburl generation")
+	dburlDir := flag.String("dburl-dir", getDburlDir(), "dburl dir")
+	dburlLicenseStart := flag.Int("dburl-license-start", 2015, "dburl license start year")
 	flag.Parse()
-	if err := run(*licenseStart, *licenseAuthor); err != nil {
+	if err := run(*licenseStart, *licenseAuthor, *dburlGen, *dburlDir, *dburlLicenseStart); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(licenseStart int, licenseAuthor string) error {
+func run(licenseStart int, licenseAuthor string, dburlGen bool, dburlDir string, dburlLicenseStart int) error {
 	wd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -84,13 +88,30 @@ func run(licenseStart int, licenseAuthor string) error {
 	if err := writeInternal(filepath.Join(wd, "internal"), baseDrivers, mostDrivers, allDrivers, badDrivers); err != nil {
 		return err
 	}
-	if err := writeReadme(wd); err != nil {
+	if err := writeReadme(wd, true); err != nil {
 		return err
 	}
 	if err := writeLicenseFiles(licenseStart, licenseAuthor); err != nil {
 		return err
 	}
+	if dburlGen {
+		if err := writeReadme(dburlDir, false); err != nil {
+			return err
+		}
+		if err := writeDburlLicense(dburlDir, dburlLicenseStart, licenseAuthor); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func getDburlDir() string {
+	dir := filepath.Join(os.Getenv("GOPATH"), "src/github.com/xo/dburl")
+	var err error
+	if dir, err = realpath.Realpath(dir); err != nil {
+		panic(err)
+	}
+	return dir
 }
 
 var dirRE = regexp.MustCompile(`^([^/]+)/([^\./]+)\.go$`)
@@ -106,7 +127,7 @@ func loadDrivers(wd string) error {
 			return nil
 		}
 		m := dirRE.FindAllStringSubmatch(n, -1)
-		if m == nil || m[0][1] != m[0][2] || contains(skipDirs, m[0][1]) {
+		if m == nil || m[0][1] != m[0][2] || slices.Contains(skipDirs, m[0][1]) {
 			return nil
 		}
 		tag, dest := m[0][1], mostDrivers
@@ -235,7 +256,7 @@ func writeInternal(wd string, drivers ...map[string]DriverInfo) error {
 	if err != nil {
 		return err
 	}
-	if err := ioutil.WriteFile(filepath.Join(wd, "internal.go"), buf, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(wd, "internal.go"), buf, 0o644); err != nil {
 		return err
 	}
 	// write <tag>.go
@@ -258,7 +279,7 @@ func writeInternal(wd string, drivers ...map[string]DriverInfo) error {
 		if err != nil {
 			return err
 		}
-		if err := ioutil.WriteFile(filepath.Join(wd, v.Tag+".go"), buf, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(wd, v.Tag+".go"), buf, 0o644); err != nil {
 			return err
 		}
 	}
@@ -292,9 +313,9 @@ const (
 	driverTableEnd   = "<!-- DRIVER DETAILS END -->"
 )
 
-func writeReadme(wd string) error {
-	readme := filepath.Join(wd, "README.md")
-	buf, err := ioutil.ReadFile(readme)
+func writeReadme(dir string, includeTagSummary bool) error {
+	readme := filepath.Join(dir, "README.md")
+	buf, err := os.ReadFile(readme)
 	if err != nil {
 		return err
 	}
@@ -307,16 +328,16 @@ func writeReadme(wd string) error {
 	if _, err := b.Write(append(buf[:start+len(driverTableStart)], '\n')); err != nil {
 		return err
 	}
-	if _, err := b.Write([]byte(buildDriverTable())); err != nil {
+	if _, err := b.Write([]byte(buildDriverTable(includeTagSummary))); err != nil {
 		return err
 	}
 	if _, err := b.Write(buf[end:]); err != nil {
 		return err
 	}
-	return ioutil.WriteFile(readme, b.Bytes(), 0644)
+	return os.WriteFile(readme, b.Bytes(), 0o644)
 }
 
-func buildDriverTable() string {
+func buildDriverTable(includeTagSummary bool) string {
 	hdr := []string{"Database", "Scheme / Tag", "Scheme Aliases", "Driver Package / Notes"}
 	widths := []int{len(hdr[0]), len(hdr[1]), len(hdr[2]), len(hdr[3])}
 	baseRows, widths := buildRows(baseDrivers, widths)
@@ -335,24 +356,27 @@ func buildDriverTable() string {
 	s += tableRows(widths, ' ', wireRows...)
 	s += tableRows(widths, ' ')
 	s += tableRows(widths, ' ', badRows...)
-	s += tableRows(widths, ' ')
-	s += tableRows(widths, ' ',
-		[]string{"**NO DRIVERS**", "`no_base`", "", "_no base drivers (useful for development)_"},
-		[]string{"**MOST DRIVERS**", "`most`", "", "_all stable drivers_"},
-		[]string{"**ALL DRIVERS**", "`all`", "", "_all drivers, excluding bad drivers_"},
-		[]string{"**BAD DRIVERS**", "`bad`", "", "_bad drivers (broken/non-working drivers)_"},
-		[]string{"**NO &lt;TAG&gt;**", "`no_<tag>`", "", "_exclude driver with `<tag>`_"},
-	)
+	if includeTagSummary {
+		s += tableRows(widths, ' ')
+		s += tableRows(widths, ' ',
+			[]string{"**NO DRIVERS**", "`no_base`", "", "_no base drivers (useful for development)_"},
+			[]string{"**MOST DRIVERS**", "`most`", "", "_all stable drivers_"},
+			[]string{"**ALL DRIVERS**", "`all`", "", "_all drivers, excluding bad drivers_"},
+			[]string{"**BAD DRIVERS**", "`bad`", "", "_bad drivers (broken/non-working drivers)_"},
+			[]string{"**NO &lt;TAG&gt;**", "`no_<tag>`", "", "_exclude driver with `<tag>`_"},
+		)
+	}
 	return s + "\n" + buildTableLinks(baseDrivers, mostDrivers, allDrivers, badDrivers)
 }
 
 var baseOrder = map[string]int{
-	"postgres":  0,
-	"mysql":     1,
-	"sqlserver": 2,
-	"oracle":    3,
-	"sqlite3":   4,
-	"csvq":      5,
+	"postgres":   0,
+	"mysql":      1,
+	"sqlserver":  2,
+	"oracle":     3,
+	"sqlite3":    4,
+	"clickhouse": 5,
+	"csvq":       6,
 }
 
 func buildRows(m map[string]DriverInfo, widths []int) ([][]string, []int) {
@@ -404,6 +428,10 @@ func buildAliases(v DriverInfo) string {
 			aliases[i] = v.Driver
 		}
 	}
+	fileTypes := dburl.FileTypes()
+	if slices.Contains(fileTypes, name) {
+		aliases = append(aliases, `file`)
+	}
 	if len(aliases) > 0 {
 		return "`" + strings.Join(aliases, "`, `") + "`"
 	}
@@ -444,11 +472,19 @@ func buildTableLinks(drivers ...map[string]DriverInfo) string {
 
 func writeLicenseFiles(licenseStart int, licenseAuthor string) error {
 	s := fmt.Sprintf(license, licenseStart, time.Now().Year(), licenseAuthor)
-	if err := ioutil.WriteFile("LICENSE", append([]byte(s), '\n'), 0644); err != nil {
+	if err := os.WriteFile("LICENSE", append([]byte(s), '\n'), 0o644); err != nil {
 		return err
 	}
 	textGo := fmt.Sprintf(licenseTextGo, s)
-	if err := ioutil.WriteFile("text/license.go", []byte(textGo), 0644); err != nil {
+	if err := os.WriteFile("text/license.go", []byte(textGo), 0o644); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writeDburlLicense(dir string, licenseStart int, licenseAuthor string) error {
+	s := fmt.Sprintf(license, licenseStart, time.Now().Year(), licenseAuthor)
+	if err := os.WriteFile(filepath.Join(dir, "LICENSE"), append([]byte(s), '\n'), 0o644); err != nil {
 		return err
 	}
 	return nil
@@ -483,19 +519,3 @@ const licenseTextGo = `package text
 // License contains the license text for usql.
 const License = ` + "`%s`" + `
 `
-
-func contains(v []string, n string) bool {
-	for _, s := range v {
-		if s == n {
-			return true
-		}
-	}
-	return false
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}

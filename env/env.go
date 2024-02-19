@@ -5,7 +5,6 @@ package env
 import (
 	"bytes"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"os/user"
@@ -16,6 +15,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/kenshaw/rasterm"
 	"github.com/xo/dburl/passfile"
 	"github.com/xo/usql/text"
 )
@@ -86,7 +86,7 @@ func EditFile(u *user.User, path, line, s string) ([]rune, error) {
 	if path != "" {
 		path = passfile.Expand(u.HomeDir, path)
 	} else {
-		f, err := ioutil.TempFile("", text.CommandLower()+".*.sql")
+		f, err := os.CreateTemp("", text.CommandLower()+".*.sql")
 		if err != nil {
 			return nil, err
 		}
@@ -95,7 +95,7 @@ func EditFile(u *user.User, path, line, s string) ([]rune, error) {
 			return nil, err
 		}
 		path = f.Name()
-		err = ioutil.WriteFile(path, []byte(strings.TrimSuffix(s, "\n")+"\n"), 0o644)
+		err = os.WriteFile(path, []byte(strings.TrimSuffix(s, "\n")+"\n"), 0o644)
 		if err != nil {
 			return nil, err
 		}
@@ -119,7 +119,7 @@ func EditFile(u *user.User, path, line, s string) ([]rune, error) {
 		return nil, err
 	}
 	// read
-	buf, err := ioutil.ReadFile(path)
+	buf, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -322,4 +322,11 @@ func Unquote(u *user.User, exec bool, v Vars) func(string, bool) (bool, string, 
 		}
 		return true, res, nil
 	}
+}
+
+// TermGraphics returns the [rasterm.TermType] based on
+func TermGraphics() rasterm.TermType {
+	var typ rasterm.TermType
+	_ = typ.UnmarshalText([]byte(Get("TERM_GRAPHICS")))
+	return typ
 }

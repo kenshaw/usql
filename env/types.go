@@ -165,6 +165,10 @@ var envVarNames = []varName{
 		"alternative location for the user's .usqlrc file",
 	},
 	{
+		text.CommandUpper() + "_SSLMODE, SSLMODE",
+		"when set to 'retry', allows postgres connections to attempt to reconnect when no ?sslmode= was specified on the url",
+	},
+	{
 		"SYNTAX_HL",
 		"enable syntax highlighting",
 	},
@@ -179,6 +183,10 @@ var envVarNames = []varName{
 	{
 		"SYNTAX_HL_OVERRIDE_BG",
 		"enables overriding the background color of the chroma styles",
+	},
+	{
+		"TERM_GRAPHICS",
+		`use the specified terminal graphics`,
 	},
 	{
 		"SHELL",
@@ -207,19 +215,25 @@ func (v Vars) All() map[string]string {
 var vars, pvars Vars
 
 func init() {
+	cmdNameUpper := strings.ToUpper(text.CommandName)
 	// get USQL_* variables
 	enableHostInformation := "true"
-	if v, _ := Getenv(strings.ToUpper(text.CommandName) + "_SHOW_HOST_INFORMATION"); v != "" {
+	if v, _ := Getenv(cmdNameUpper + "_SHOW_HOST_INFORMATION"); v != "" {
 		enableHostInformation = v
+	}
+	// get NO_COLOR
+	noColor := false
+	if s, ok := Getenv("NO_COLOR"); ok {
+		noColor = s != "0" && s != "false" && s != "off"
 	}
 	// get color level
 	colorLevel, _ := terminfo.ColorLevelFromEnv()
 	enableSyntaxHL := "true"
-	if colorLevel < terminfo.ColorLevelBasic {
+	if noColor || colorLevel < terminfo.ColorLevelBasic {
 		enableSyntaxHL = "false"
 	}
 	// pager
-	pagerCmd, ok := Getenv(strings.ToUpper(text.CommandName)+"_PAGER", "PAGER")
+	pagerCmd, ok := Getenv(cmdNameUpper+"_PAGER", "PAGER")
 	pager := "off"
 	if !ok {
 		for _, s := range []string{"less", "more"} {
@@ -233,7 +247,12 @@ func init() {
 		pager = "on"
 	}
 	// editor
-	editorCmd, _ := Getenv(strings.ToUpper(text.CommandName)+"_EDITOR", "EDITOR", "VISUAL")
+	editorCmd, _ := Getenv(cmdNameUpper+"_EDITOR", "EDITOR", "VISUAL")
+	// sslmode
+	sslmode, ok := Getenv(cmdNameUpper+"_SSLMODE", "SSLMODE")
+	if !ok {
+		sslmode = "retry"
+	}
 	vars = Vars{
 		// usql related logic
 		"SHOW_HOST_INFORMATION": enableHostInformation,
@@ -247,6 +266,8 @@ func init() {
 		"SYNTAX_HL_FORMAT":      colorLevel.ChromaFormatterName(),
 		"SYNTAX_HL_STYLE":       "monokai",
 		"SYNTAX_HL_OVERRIDE_BG": "true",
+		"SSLMODE":               sslmode,
+		"TERM_GRAPHICS":         "none",
 	}
 	// determine locale
 	locale := "en-US"
@@ -541,14 +562,6 @@ func GoTime() string {
 		return s
 	}
 	return tfmt
-}
-
-// max returns maximum of a, b.
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // Listing writes the formatted variables listing to w, separated into different
